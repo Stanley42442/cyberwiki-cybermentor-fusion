@@ -1,18 +1,19 @@
 // src/pages/Contribute.tsx
 // Contribution form with:
 // - Written text (markdown supported)
-// - PDF/DOCX file upload (stored in Supabase Storage)
+// - PDF/DOCX file upload (text extracted in browser, sent to AI for validation)
 // - Video link (YouTube, Google Drive, etc.) — AI analysis in a future update
 // - Past question tips
 
 import { useState, useRef } from 'react';
 import { Link, useSearchParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Shield, Upload, X, FileText, ExternalLink, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Shield, Upload, X, FileText, ExternalLink, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/lib/auth-context';
 import { useCourses } from '@/lib/courses-context';
 import { useContributions } from '@/lib/contributions-context';
 import { supabase } from '@/integrations/supabase/client';
+import { extractTextFromFile } from '@/lib/extract-document-text';
 import { toast } from 'sonner';
 
 const ACCEPTED_FILE_TYPES = '.pdf,.doc,.docx';
@@ -56,6 +57,10 @@ const Contribute = () => {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadedFileUrl, setUploadedFileUrl] = useState('');
 
+  // Extracted text from PDF/DOCX (used as the real content for AI validation)
+  const [extractedText, setExtractedText] = useState<string | null>(null);
+  const [isExtracting, setIsExtracting] = useState(false);
+
   if (!user) {
     return (
       <Layout>
@@ -89,26 +94,44 @@ const Contribute = () => {
   }
 
   // ── File handling ────────────────────────────────────────────
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     setFileError('');
     setUploadedFileUrl('');
+    setExtractedText(null);
     if (!file) return;
 
-    // Validate type
-    const allowed = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'];
+    const allowed = [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ];
     if (!allowed.includes(file.type)) {
       setFileError('Only PDF, DOC, and DOCX files are accepted.');
       return;
     }
-
-    // Validate size
     if (file.size > MAX_FILE_BYTES) {
       setFileError(`File is too large. Maximum size is ${MAX_FILE_MB}MB.`);
       return;
     }
 
     setSelectedFile(file);
+
+    // Extract text immediately so the AI gets the real document content
+    setIsExtracting(true);
+    try {
+      const text = await extractTextFromFile(file);
+      setExtractedText(text);
+      if (text && text.length > 100) {
+        toast.success('Document read successfully — AI will validate the full content.');
+      } else {
+        toast.info('Could not read document text automatically. Please fill in the summary below.');
+      }
+    } catch {
+      setExtractedText(null);
+    } finally {
+      setIsExtracting(false);
+    }
   };
 
   const uploadFile = async (): Promise<string> => {
@@ -132,7 +155,6 @@ const Contribute = () => {
     }
 
     setUploadProgress(80);
-
     const { data: urlData } = supabase.storage.from('contributions').getPublicUrl(path);
     const publicUrl = urlData.publicUrl;
 
@@ -147,6 +169,7 @@ const Contribute = () => {
     setUploadedFileUrl('');
     setFileError('');
     setUploadProgress(0);
+    setExtractedText(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -160,8 +183,9 @@ const Contribute = () => {
     if (contentType === 'pdf') {
       if (!selectedFile && !uploadedFileUrl) return 'Please select a file to upload.';
       if (fileError) return fileError;
-      // Still require some written context for AI validation
-      if (!content.trim()) return 'Please add a brief description of what this document covers (for AI validation).';
+      if (isExtracting) return 'Please wait — document is still being processed.';
+      const hasContent = (extractedText && extractedText.length > 50) || content.trim().length > 20;
+      if (!hasContent) return 'Please add a brief description of what this document covers.';
     }
     if (contentType === 'video') {
       if (!videoUrl.trim()) return 'Please enter a video URL.';
@@ -184,11 +208,20 @@ const Contribute = () => {
         pdfUrl = await uploadFile();
       }
 
+      // Use extracted text as the main content for document contributions.
+      // The user summary is appended as extra context.
+      // This means the AI actually validates the document body, not just a short description.
+      const effectiveContent = contentType === 'pdf'
+        ? (extractedText && extractedText.length > 50
+            ? extractedText + (content.trim() ? `\n\nDocument Summary: ${content.trim()}` : '')
+            : content.trim() || '[Document contribution — see attached file]')
+        : content.trim();
+
       await submitContribution({
         courseId,
         contentType,
         title: title.trim(),
-        content: content.trim() || `[${contentType.toUpperCase()} contribution — see attached]`,
+        content: effectiveContent,
         pdfUrl: contentType === 'pdf' ? (pdfUrl || uploadedFileUrl) : undefined,
         videoUrl: contentType === 'video' ? videoUrl.trim() : undefined,
         whatItAdds: whatItAdds.trim() || undefined,
@@ -202,8 +235,7 @@ const Contribute = () => {
     }
   };
 
-  const selectedContentType = contentTypes.find(ct => ct.value === contentType);
-  const canSubmit = !isAIProcessing && !uploading && !fileError;
+  const canSubmit = !isAIProcessing && !uploading && !isExtracting && !fileError;
 
   return (
     <Layout>
@@ -290,6 +322,23 @@ const Contribute = () => {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-foreground truncate">{selectedFile.name}</p>
                     <p className="text-xs text-muted-foreground">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
+
+                    {isExtracting && (
+                      <div className="flex items-center gap-1.5 mt-1.5 text-xs text-primary">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Reading document text for AI validation…
+                      </div>
+                    )}
+                    {!isExtracting && extractedText && extractedText.length > 50 && (
+                      <div className="flex items-center gap-1.5 mt-1.5 text-xs text-green-500">
+                        <CheckCircle2 className="w-3 h-3" />
+                        {Math.ceil(extractedText.length / 5)} words extracted — AI will read the full document
+                      </div>
+                    )}
+                    {!isExtracting && extractedText === null && selectedFile && (
+                      <p className="text-xs text-orange-400 mt-1.5">Could not auto-read text — fill in the summary below</p>
+                    )}
+
                     {uploading && (
                       <div className="mt-2">
                         <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
@@ -318,16 +367,17 @@ const Contribute = () => {
                 </div>
               )}
 
-              {/* Description field for AI validation */}
               <div className="mt-3">
                 <label className="text-sm font-medium text-foreground block mb-1.5">
-                  Document Summary <span className="text-destructive">*</span>
+                  Document Summary
                   <span className="text-muted-foreground font-normal ml-2">
-                    — needed for AI validation (describe what the document covers)
+                    {extractedText && extractedText.length > 50
+                      ? '— optional, adds context'
+                      : '— describe what this document covers (required if text could not be auto-read)'}
                   </span>
                 </label>
-                <textarea value={content} onChange={e => setContent(e.target.value)} rows={4}
-                  placeholder="e.g. Week 3 lecture notes covering the CIA Triad (Confidentiality, Integrity, Availability), with definitions, examples, and exam-style questions at the end."
+                <textarea value={content} onChange={e => setContent(e.target.value)} rows={3}
+                  placeholder="e.g. Week 3 lecture notes covering the CIA Triad, with definitions, examples, and exam-style questions."
                   className="w-full px-4 py-2.5 rounded-lg bg-background border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary resize-y transition-colors" />
               </div>
             </div>
@@ -349,19 +399,17 @@ const Contribute = () => {
                   ))}
                 </div>
               </div>
-
               <div className="p-3 rounded-lg bg-primary/5 border border-primary/15 text-xs text-muted-foreground">
                 <p className="font-medium text-foreground mb-1">🎬 AI video analysis — coming soon</p>
                 <p>Once subscriptions launch, the AI will be able to watch and summarise videos automatically. For now, please add a written summary below so the AI validator can check relevance.</p>
               </div>
-
               <div>
                 <label className="text-sm font-medium text-foreground block mb-1.5">
                   Video Summary <span className="text-destructive">*</span>
                   <span className="text-muted-foreground font-normal ml-2">— briefly describe what the video covers</span>
                 </label>
                 <textarea value={content} onChange={e => setContent(e.target.value)} rows={4}
-                  placeholder="e.g. This YouTube video by Professor John explains Public Key Infrastructure with visual diagrams. Covers how certificates work, PKI hierarchy, and real-world HTTPS examples."
+                  placeholder="e.g. This YouTube video by Professor John explains Public Key Infrastructure with visual diagrams."
                   className="w-full px-4 py-2.5 rounded-lg bg-background border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary resize-y transition-colors" />
               </div>
             </div>
@@ -398,7 +446,6 @@ const Contribute = () => {
               className="w-full px-4 py-2.5 rounded-lg bg-background border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors" />
           </div>
 
-          {/* Info box for trusted contributors */}
           {(user.tier === 'trusted_contributor' || user.tier === 'admin') && (
             <div className="flex items-start gap-2 p-3 rounded-lg bg-primary/5 border border-primary/15">
               <span className="text-primary mt-0.5">⚡</span>
@@ -410,7 +457,8 @@ const Contribute = () => {
 
           <button type="submit" disabled={!canSubmit}
             className="w-full py-3 rounded-lg bg-primary text-primary-foreground font-medium text-sm hover:bg-primary/90 transition-colors disabled:opacity-50 min-h-[48px]">
-            {uploading ? `Uploading… ${uploadProgress}%` :
+            {isExtracting ? 'Reading document…' :
+             uploading ? `Uploading… ${uploadProgress}%` :
              isAIProcessing ? 'AI is validating…' :
              'Submit for Review'}
           </button>

@@ -205,17 +205,25 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
     try {
       const course = courses.find(c => c.id === contrib.courseId);
       const { data, error } = await supabase.functions.invoke('validate-contribution', {
-        body: { title: contrib.title, content: contrib.content, contentType: contrib.contentType, courseTitle: course?.title || '', courseCode: course?.code || '' },
+        body: {
+          contributionId: newContrib.id,   // edge function will update DB status itself
+          title: contrib.title,
+          content: contrib.content,
+          contentType: contrib.contentType,
+          courseTitle: course?.title || '',
+          courseCode: course?.code || '',
+        },
       });
       if (error) throw error;
       const isValid = data?.isValid !== false;
       const isRelevant = data?.isRelevant !== false;
+      // Update local React state only — the edge function already updated the DB
       const updated = withNew.map(c => c.id === newContrib.id ? {
         ...c, status: (isValid ? 'ai_accepted' : 'ai_rejected') as Contribution['status'],
         aiRejectionReason: isValid ? undefined : (data?.issues?.join('; ') || 'Did not pass quality checks'),
         accuracyScore: data?.qualityScore,
       } : c);
-      await persist(updated, newContrib.id);
+      setContributions(updated);   // local state only, no DB upsert (edge fn handled it)
       addNotification({
         userId: newContrib.authorMatNumber,
         type: isValid ? 'ai_accepted' : 'ai_rejected',
@@ -229,12 +237,15 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
       }
     } catch (e) {
       console.error('[contributions] Validation failed, using fallback:', e);
+      // Fallback: mark as accepted if content is substantial enough
       const isValid = contrib.content.length > 50;
       const updated = withNew.map(c => c.id === newContrib.id ? {
         ...c, status: (isValid ? 'ai_accepted' : 'ai_rejected') as Contribution['status'],
         aiRejectionReason: isValid ? undefined : 'Content too short or low quality',
       } : c);
-      await persist(updated, newContrib.id);
+      // In fallback, update DB via service-role-capable upsert is not possible from client.
+      // Update local state and log — admin can manually approve if needed.
+      setContributions(updated);
       addNotification({ userId: newContrib.authorMatNumber, type: isValid ? 'ai_accepted' : 'ai_rejected', message: isValid ? `Your contribution "${newContrib.title}" passed review.` : `Your contribution "${newContrib.title}" was rejected: Content too short.`, contributionId: newContrib.id, read: false });
     }
     setIsAIProcessing(false);
