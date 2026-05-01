@@ -1,23 +1,22 @@
 // src/lib/extract-document-text.ts
-// Browser-side text extraction for PDF and DOCX files.
+// Browser-side text extraction — fully self-hosted, no CDN calls.
 //
-// PDF  — uses pdfjs-dist (npm package, bundled by Vite).
-//         Worker is pointed at the matching version on unpkg CDN to avoid
-//         Vite worker-bundling complexity.
-// DOCX — uses mammoth loaded from CDN (small, no bundling issues).
+// PDF  — pdfjs-dist (npm). Worker served from the same Vercel deployment
+//         via Vite's ?url import, so no CDN and no CSP issues.
+// DOCX — mammoth (npm). Bundled by Vite, no runtime script loading.
 
 import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import mammoth from 'mammoth';
 
-// Point the PDF.js worker at the exact same version we installed via npm.
-// This avoids the Vite worker-bundle problem while keeping the main lib local.
-pdfjsLib.GlobalWorkerOptions.workerSrc =
-  `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+// Serve the worker from the same origin — avoids unpkg/CDN CSP blocks
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const MAX_CHARS = 8000;
 
 /**
  * Extract plain text from a PDF or DOCX File object.
- * Returns null if extraction fails — caller should fall back to user summary.
+ * Returns null on failure — caller falls back to the user-typed summary.
  */
 export async function extractTextFromFile(file: File): Promise<string | null> {
   const ext = file.name.split('.').pop()?.toLowerCase();
@@ -31,61 +30,37 @@ export async function extractTextFromFile(file: File): Promise<string | null> {
   }
 }
 
-// ── PDF via pdfjs-dist (npm) ──────────────────────────────────────────────────
+// ── PDF ───────────────────────────────────────────────────────────────────────
 async function extractPdf(file: File): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) });
-  const pdf = await loadingTask.promise;
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
 
   const totalPages = pdf.numPages;
   const maxPages = Math.min(totalPages, 20);
-  const pageTexts: string[] = [];
+  const parts: string[] = [];
 
   for (let i = 1; i <= maxPages; i++) {
     const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    const pageText = (textContent.items as Array<{ str: string }>)
+    const content = await page.getTextContent();
+    const text = (content.items as Array<{ str: string }>)
       .map(item => item.str)
       .join(' ')
       .replace(/\s{3,}/g, '\n\n')
       .trim();
-
-    if (pageText) pageTexts.push(pageText);
-    if (pageTexts.join('\n\n').length >= MAX_CHARS) break;
+    if (text) parts.push(text);
+    if (parts.join('\n\n').length >= MAX_CHARS) break;
   }
 
-  const full = pageTexts.join('\n\n');
-  const truncated = full.slice(0, MAX_CHARS);
-  const suffix = totalPages > maxPages
-    ? `\n\n[Note: extracted from first ${maxPages} of ${totalPages} pages]`
+  const result = parts.join('\n\n').slice(0, MAX_CHARS);
+  const note = totalPages > maxPages
+    ? `\n\n[Extracted from first ${maxPages} of ${totalPages} pages]`
     : '';
-
-  return (truncated + suffix).trim();
+  return (result + note).trim();
 }
 
-// ── DOCX via Mammoth (CDN) ────────────────────────────────────────────────────
+// ── DOCX ──────────────────────────────────────────────────────────────────────
 async function extractDocx(file: File): Promise<string> {
-  // @ts-expect-error — mammoth is loaded from CDN at runtime
-  if (!window.mammoth) {
-    await loadScript(
-      'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js'
-    );
-  }
-  // @ts-expect-error
-  const mammoth = window.mammoth;
   const arrayBuffer = await file.arrayBuffer();
   const result = await mammoth.extractRawText({ arrayBuffer });
-  return (result.value as string).replace(/\n{3,}/g, '\n\n').trim().slice(0, MAX_CHARS);
-}
-
-// ── Utility ───────────────────────────────────────────────────────────────────
-function loadScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error(`Failed to load ${src}`));
-    document.head.appendChild(s);
-  });
+  return result.value.replace(/\n{3,}/g, '\n\n').trim().slice(0, MAX_CHARS);
 }
