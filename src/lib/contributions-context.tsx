@@ -19,6 +19,7 @@ interface ContributionsContextType {
   editContribution: (id: string, updates: Partial<Contribution>) => void;
   adminApprove: (id: string, outcome: 'accepted_as_is' | 'accepted_with_edits', reviewerName: string) => void;
   adminReject: (id: string, reason: string, reviewerName: string) => void;
+  adminDelete: (id: string) => Promise<void>;
   forceRegenerateStudyNote: (courseId: string) => Promise<void>;
   isAIProcessing: boolean;
   isAutoGenerating: boolean;
@@ -164,12 +165,9 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
       if (!course) continue;
       setIsAutoGenerating(true);
       try {
+        // Extraction already happened at approval time — just synthesise
         const { data, error } = await supabase.functions.invoke('generate-study-note', {
-          body: {
-            courseTitle: course.title, courseCode: course.code, courseDescription: course.description,
-            courseId,  // needed for automatic topic extraction after generation
-            contributions: approvedByCourse[courseId].map(c => ({ title: c.title, content: c.content, type: c.contentType })),
-          },
+          body: { courseId, courseTitle: course.title, courseCode: course.code, courseDescription: course.description },
         });
         if (!error && data?.studyNote) {
           const newNotes = { ...notes, [courseId]: { content: data.studyNote, generatedAt: data.generatedAt || new Date().toISOString(), sourceCount: approvedByCourse[courseId].length } };
@@ -185,7 +183,16 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
   useEffect(() => {
     const timer = setTimeout(checkAndGenerateNotes, 5000);
     autoGenRef.current = setInterval(checkAndGenerateNotes, 30 * 60 * 1000);
-    return () => { clearTimeout(timer); if (autoGenRef.current) clearInterval(autoGenRef.current); };
+    const adminDelete = async (id: string) => {
+    const contrib = contributions.find(c => c.id === id);
+    // Remove from DB using service role via supabase client (admin user bypasses RLS)
+    const { error } = await supabase.from('contributions').delete().eq('id', id);
+    if (error) { toast.error('Failed to delete contribution'); return; }
+    setContributions(prev => prev.filter(c => c.id !== id));
+    toast.success(`Deleted "${contrib?.title ?? 'contribution'}"`);
+  };
+
+  return () => { clearTimeout(timer); if (autoGenRef.current) clearInterval(autoGenRef.current); };
   }, [checkAndGenerateNotes]);
 
   const submitContribution = async (contrib: Omit<Contribution, 'id' | 'status' | 'submittedAt' | 'isFastTrack'>) => {
@@ -261,7 +268,41 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
     const updated = contributions.map(c => c.id === id ? { ...c, status: 'admin_approved' as const, reviewedAt: new Date().toISOString(), reviewedBy: reviewerName, reviewOutcome: outcome } : c);
     await persist(updated, id);
     if (contrib) addNotification({ userId: contrib.authorMatNumber, type: 'admin_approved', message: `Your contribution "${contrib.title}" has been approved by ${reviewerName}.`, contributionId: id, read: false });
-    toast.success('Contribution approved');
+    toast.success('Contribution approved — extracting concepts in background…');
+
+    // Fire-and-forget batched extraction.
+    // Calls extract-concepts repeatedly with increasing batchOffset until done: true.
+    // Each call processes 4 chunks (~80-100s), well under Supabase's 150s limit.
+    // generate-study-note checks extraction_status before synthesising.
+    if (contrib) {
+      const course = courses.find(c => c.id === contrib.courseId);
+      const runExtraction = async () => {
+        let offset = 0;
+        let done = false;
+        while (!done) {
+          const { data, error } = await supabase.functions.invoke('extract-concepts', {
+            body: {
+              contributionId: id,
+              contributionTitle: contrib.title,
+              contributionContent: contrib.content,
+              courseCode: course?.code ?? '',
+              courseTitle: course?.title ?? '',
+              batchOffset: offset,
+              batchSize: 4,
+            },
+          });
+          if (error) {
+            console.error(`[contributions] Extraction batch failed at offset ${offset} for "${contrib.title}":`, error);
+            break;
+          }
+          console.log(`[contributions] Extraction batch done — offset ${offset}, chunks processed: ${data?.chunksProcessed}/${data?.totalChunks}`);
+          done = data?.done ?? true;
+          offset = data?.nextBatchOffset ?? offset + 4;
+        }
+        if (done) console.log(`[contributions] Extraction complete for "${contrib.title}"`);
+      };
+      runExtraction().catch(e => console.error('[contributions] Extraction loop threw:', e));
+    }
   };
 
   const adminReject = async (id: string, reason: string, reviewerName: string) => {
@@ -278,28 +319,37 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
     const approved = contributions.filter(c => c.courseId === courseId && c.status === 'admin_approved');
     if (!approved.length) { toast.error('No approved contributions to generate from'); return; }
     setIsAutoGenerating(true);
-    toast.info('Generating study note…');
+    toast.info('Writing study note from saved extractions…');
+
     try {
+      // Extraction already happened at approval time — just synthesise
       const { data, error } = await supabase.functions.invoke('generate-study-note', {
-        body: { courseTitle: course.title, courseCode: course.code, courseDescription: course.description, courseId, contributions: approved.map(c => ({ title: c.title, content: c.content, type: c.contentType })) },
+        body: { courseId, courseTitle: course.title, courseCode: course.code, courseDescription: course.description },
       });
       if (error) throw error;
+
       if (data?.studyNote) {
         const newNotes = { ...studyNotes, [courseId]: { content: data.studyNote, generatedAt: data.generatedAt || new Date().toISOString(), sourceCount: approved.length } };
         await persistNotes(newNotes, courseId);
         const fps = loadFingerprints();
         fps[courseId] = generateFingerprint(approved);
         try { saveFingerprints(fps); } catch { /* localStorage full */ }
-        toast.success('Study note regenerated!');
+        // Show warnings if any contributions were skipped
+        if (data.warnings?.length > 0) {
+          data.warnings.forEach((w: string) => toast.warning(w, { duration: 8000 }));
+          toast.success('Study note generated (some contributions are still processing — regenerate soon)');
+        } else {
+          toast.success('Study note generated from all contributions!');
+        }
       }
-    } catch (e) { console.error('[contributions] Force generate failed:', e); toast.error('Failed to generate study note'); }
+    } catch (e) { console.error('[contributions] Force generate failed:', e); toast.error(`Failed to generate: ${(e as Error).message}`); }
     setIsAutoGenerating(false);
   };
 
   return (
     <ContributionsContext.Provider value={{
       contributions, studyNotes, submitContribution, editContribution,
-      adminApprove, adminReject, forceRegenerateStudyNote,
+      adminApprove, adminReject, adminDelete, forceRegenerateStudyNote,
       isAIProcessing, isAutoGenerating, unreadCount: 0,
     }}>
       {children}

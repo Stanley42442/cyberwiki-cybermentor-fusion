@@ -16,6 +16,41 @@ const typeLabels: Record<string, string> = {
   written: '✏️ Written', pdf: '📄 PDF', video: '🎬 Video', 'past-question-tips': '📝 Past Q Tips',
 };
 
+// Truncated contribution content with Read More toggle
+const PREVIEW_LENGTH = 300;
+const ContribContent = ({ content, pdfUrl }: { content: string; pdfUrl?: string }) => {
+  const [expanded, setExpanded] = useState(false);
+  const isLong = content.length > PREVIEW_LENGTH;
+  const displayed = expanded || !isLong ? content : content.slice(0, PREVIEW_LENGTH) + '…';
+
+  return (
+    <div className="mb-3">
+      {pdfUrl ? (
+        // Document contribution — show summary + link, don't dump full extracted text
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line line-clamp-3">
+            {content.slice(0, PREVIEW_LENGTH)}{content.length > PREVIEW_LENGTH ? '…' : ''}
+          </p>
+          <a href={pdfUrl} target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline">
+            <FileText className="h-3 w-3" /> View uploaded document
+          </a>
+        </div>
+      ) : (
+        <div>
+          <p className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line">{displayed}</p>
+          {isLong && (
+            <button onClick={() => setExpanded(e => !e)}
+              className="text-xs text-primary hover:underline mt-1.5">
+              {expanded ? 'Show less' : 'Read more'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const CoursePage = () => {
   const { id } = useParams();
   const { courses } = useCourses();
@@ -174,7 +209,7 @@ const CoursePage = () => {
                   </span>
                 )}
               </div>
-              <p className="text-sm text-muted-foreground leading-relaxed mb-3 whitespace-pre-line">{contrib.content}</p>
+              <ContribContent content={contrib.content} pdfUrl={contrib.pdfUrl} />
               <div className="flex items-center justify-between text-xs text-muted-foreground flex-wrap gap-2">
                 <span>{contrib.authorName} · {new Date(contrib.submittedAt).toLocaleDateString()}</span>
                 <div className="flex items-center gap-2 flex-wrap">

@@ -1,7 +1,7 @@
 // src/pages/AdminDashboard.tsx
 import { useState, useEffect } from 'react';
 import { Navigate } from 'react-router-dom';
-import { Download, AlertCircle, RefreshCw, Plus, Edit2, Check, X, ArchiveRestore, Archive, Eye, EyeOff, Flag, Calendar } from 'lucide-react';
+import { Download, AlertCircle, RefreshCw, Plus, Edit2, Check, X, ArchiveRestore, Archive, Eye, EyeOff, Flag, Calendar, Trash2, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react';
 import Layout from '@/components/Layout';
 import { useAuth } from '@/lib/auth-context';
 import { useCourses } from '@/lib/courses-context';
@@ -26,7 +26,7 @@ const blankForm = () => ({
 const AdminDashboard = () => {
   const { user, allUsers, verifyUser, rejectUser, promoteToAdmin, demoteFromAdmin, promoteToTrusted, demoteFromTrusted } = useAuth();
   const { allCourses, loading: coursesLoading, addCourse, updateCourse, archiveCourse, restoreCourse, toggleVisibility } = useCourses();
-  const { contributions, studyNotes, adminApprove, adminReject, forceRegenerateStudyNote, isAutoGenerating } = useContributions();
+  const { contributions, studyNotes, adminApprove, adminReject, adminDelete, forceRegenerateStudyNote, isAutoGenerating } = useContributions();
 
   const [tab, setTab] = useState<Tab>('pending-users');
 
@@ -37,6 +37,10 @@ const AdminDashboard = () => {
   // Contribution modals
   const [contribRejectReason, setContribRejectReason] = useState('');
   const [contribRejectTarget, setContribRejectTarget] = useState<string | null>(null);
+  const [contribFilter, setContribFilter] = useState<string>('all');
+  const [editTarget, setEditTarget] = useState<string | null>(null);
+  const [editContent, setEditContent] = useState<string>('');
+  const [expandedContrib, setExpandedContrib] = useState<string | null>(null);
 
   // Course form
   const [courseForm, setCourseForm] = useState(blankForm());
@@ -112,6 +116,7 @@ const AdminDashboard = () => {
 
   const pendingUsers = allUsers.filter(u => u.status === 'pending');
   const aiAccepted = contributions.filter(c => c.status === 'ai_accepted');
+  const allContribs = [...contributions].sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
   const activeCourses = allCourses.filter(c => c.active);
   const archivedCourses = allCourses.filter(c => !c.active);
 
@@ -299,31 +304,158 @@ const AdminDashboard = () => {
         )}
 
         {/* ── Contributions ──────────────────────────────────────────────────── */}
-        {tab === 'contributions' && (
-          <div className="space-y-3">
-            <h3 className="text-sm font-semibold text-muted-foreground uppercase mb-2">Pending Admin Review ({aiAccepted.length})</h3>
-            {aiAccepted.length === 0 ? <p className="text-muted-foreground text-sm">No contributions pending review.</p>
-              : aiAccepted.map(c => (
-                <div key={c.id} className="card-cyber p-4">
-                  <h4 className="font-semibold text-foreground mb-1">{c.title}</h4>
-                  <p className="text-sm text-muted-foreground mb-2 line-clamp-3">{c.content}</p>
-                  <p className="text-xs text-muted-foreground mb-3">by {c.authorName} · {c.contentType}</p>
-                  <div className="flex gap-2 flex-wrap">
-                    <button onClick={() => adminApprove(c.id, 'accepted_as_is', user.display_name)} className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs min-h-[34px]">Accept As-Is</button>
-                    <button onClick={() => adminApprove(c.id, 'accepted_with_edits', user.display_name)} className="px-3 py-1.5 rounded-lg bg-primary/70 text-primary-foreground text-xs min-h-[34px]">Accept w/ Edits</button>
-                    {contribRejectTarget === c.id ? (
-                      <div className="flex gap-1">
-                        <input value={contribRejectReason} onChange={e => setContribRejectReason(e.target.value)} placeholder="Reason..." className="px-2 py-1 rounded bg-background border border-border text-xs w-32" />
-                        <button onClick={() => { adminReject(c.id, contribRejectReason, user.display_name); setContribRejectTarget(null); setContribRejectReason(''); }} className="px-2 py-1 rounded bg-destructive text-destructive-foreground text-xs">Reject</button>
+        {tab === 'contributions' && (() => {
+          const STATUS_FILTERS = ['all', 'ai_accepted', 'admin_approved', 'ai_rejected', 'under_review'];
+          const STATUS_LABELS: Record<string, string> = {
+            all: 'All', ai_accepted: 'Pending Review', admin_approved: 'Approved',
+            ai_rejected: 'AI Rejected', under_review: 'Under Review',
+          };
+          const STATUS_COLORS: Record<string, string> = {
+            ai_accepted: 'text-yellow-400 border-yellow-400/30',
+            admin_approved: 'text-green-400 border-green-400/30',
+            ai_rejected: 'text-destructive border-destructive/30',
+            under_review: 'text-muted-foreground border-border',
+          };
+          const filtered = contribFilter === 'all' ? allContribs : allContribs.filter(c => c.status === contribFilter);
+
+          return (
+            <div className="space-y-4">
+              {/* Filter tabs */}
+              <div className="flex gap-1.5 flex-wrap">
+                {STATUS_FILTERS.map(f => (
+                  <button key={f} onClick={() => setContribFilter(f)}
+                    className={`px-3 py-1.5 rounded-lg text-xs transition-colors min-h-[34px] ${contribFilter === f ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground hover:text-foreground'}`}>
+                    {STATUS_LABELS[f]}
+                    {f !== 'all' && <span className="ml-1.5 opacity-70">({allContribs.filter(c => c.status === f).length})</span>}
+                    {f === 'all' && <span className="ml-1.5 opacity-70">({allContribs.length})</span>}
+                  </button>
+                ))}
+              </div>
+
+              {filtered.length === 0
+                ? <p className="text-muted-foreground text-sm py-4">No contributions in this category.</p>
+                : filtered.map(c => {
+                  const isExpanded = expandedContrib === c.id;
+                  const isEditing = editTarget === c.id;
+                  const isPdf = c.contentType === 'pdf';
+                  const previewText = c.content?.slice(0, 200) ?? '';
+
+                  return (
+                    <div key={c.id} className="card-cyber p-4">
+                      {/* Header */}
+                      <div className="flex items-start justify-between gap-2 mb-1">
+                        <h4 className="font-semibold text-foreground text-sm leading-snug flex-1">{c.title}</h4>
+                        <span className={`text-xs px-2 py-0.5 rounded border flex-shrink-0 ${STATUS_COLORS[c.status] ?? 'text-muted-foreground border-border'}`}>
+                          {STATUS_LABELS[c.status] ?? c.status}
+                        </span>
                       </div>
-                    ) : (
-                      <button onClick={() => setContribRejectTarget(c.id)} className="px-3 py-1.5 rounded-lg border border-destructive text-destructive text-xs min-h-[34px]">Reject</button>
-                    )}
-                  </div>
-                </div>
-              ))}
-          </div>
-        )}
+
+                      <p className="text-xs text-muted-foreground mb-2">
+                        by {c.authorName} · {c.contentType} · {new Date(c.submittedAt).toLocaleDateString()}
+                      </p>
+
+                      {/* Content — editable if editing, expandable otherwise */}
+                      {isEditing ? (
+                        <textarea
+                          value={editContent}
+                          onChange={e => setEditContent(e.target.value)}
+                          rows={8}
+                          className="w-full px-3 py-2 rounded-lg bg-background border border-primary text-sm text-foreground focus:outline-none resize-y mb-2 font-mono"
+                        />
+                      ) : (
+                        <div className="mb-2">
+                          {isPdf && c.pdfUrl ? (
+                            <div className="space-y-1">
+                              <p className="text-xs text-muted-foreground line-clamp-2">{previewText}…</p>
+                              <a href={c.pdfUrl} target="_blank" rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+                                <ExternalLink className="w-3 h-3" /> View document
+                              </a>
+                            </div>
+                          ) : (
+                            <div>
+                              <p className="text-sm text-muted-foreground whitespace-pre-line">
+                                {isExpanded ? c.content : previewText + (c.content?.length > 200 ? '…' : '')}
+                              </p>
+                              {c.content?.length > 200 && (
+                                <button onClick={() => setExpandedContrib(isExpanded ? null : c.id)}
+                                  className="flex items-center gap-1 text-xs text-primary hover:underline mt-1">
+                                  {isExpanded ? <><ChevronUp className="w-3 h-3" /> Show less</> : <><ChevronDown className="w-3 h-3" /> Read more</>}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Action buttons */}
+                      <div className="flex gap-2 flex-wrap mt-3 pt-3 border-t border-border/50">
+                        {/* Approve actions — only for ai_accepted */}
+                        {c.status === 'ai_accepted' && !isEditing && (
+                          <>
+                            <button onClick={() => adminApprove(c.id, 'accepted_as_is', user.display_name)}
+                              className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs min-h-[34px]">
+                              Approve
+                            </button>
+                            {/* Accept with edits — open editor first, then approve */}
+                            <button onClick={() => { setEditTarget(c.id); setEditContent(c.content ?? ''); }}
+                              className="px-3 py-1.5 rounded-lg bg-primary/70 text-primary-foreground text-xs min-h-[34px]">
+                              Edit & Approve
+                            </button>
+                          </>
+                        )}
+
+                        {/* Save edits button */}
+                        {isEditing && (
+                          <>
+                            <button onClick={async () => {
+                              await supabase.from('contributions').update({ content: editContent }).eq('id', c.id);
+                              adminApprove(c.id, 'accepted_with_edits', user.display_name);
+                              setEditTarget(null); setEditContent('');
+                            }} className="px-3 py-1.5 rounded-lg bg-primary text-primary-foreground text-xs min-h-[34px]">
+                              Save & Approve
+                            </button>
+                            <button onClick={() => { setEditTarget(null); setEditContent(''); }}
+                              className="px-3 py-1.5 rounded-lg bg-secondary text-muted-foreground text-xs min-h-[34px]">
+                              Cancel
+                            </button>
+                          </>
+                        )}
+
+                        {/* Reject — only for ai_accepted */}
+                        {c.status === 'ai_accepted' && !isEditing && (
+                          contribRejectTarget === c.id ? (
+                            <div className="flex gap-1">
+                              <input value={contribRejectReason} onChange={e => setContribRejectReason(e.target.value)}
+                                placeholder="Reason..." className="px-2 py-1 rounded bg-background border border-border text-xs w-32" />
+                              <button onClick={() => { adminReject(c.id, contribRejectReason, user.display_name); setContribRejectTarget(null); setContribRejectReason(''); }}
+                                className="px-2 py-1 rounded bg-destructive text-destructive-foreground text-xs">Reject</button>
+                              <button onClick={() => setContribRejectTarget(null)} className="px-2 py-1 rounded bg-secondary text-xs">Cancel</button>
+                            </div>
+                          ) : (
+                            <button onClick={() => setContribRejectTarget(c.id)}
+                              className="px-3 py-1.5 rounded-lg border border-destructive text-destructive text-xs min-h-[34px]">
+                              Reject
+                            </button>
+                          )
+                        )}
+
+                        {/* Delete — always visible */}
+                        {!isEditing && (
+                          <button onClick={() => {
+                            if (confirm(`Delete "${c.title}"? This cannot be undone.`)) adminDelete(c.id);
+                          }} className="ml-auto p-1.5 rounded-lg text-muted-foreground hover:text-destructive transition-colors min-h-[34px]" title="Delete contribution">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              }
+            </div>
+          );
+        })()}
 
         {/* ── Courses ────────────────────────────────────────────────────────── */}
         {tab === 'courses' && (
