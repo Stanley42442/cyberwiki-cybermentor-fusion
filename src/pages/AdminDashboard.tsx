@@ -58,26 +58,28 @@ const AdminDashboard = () => {
   const [examLoading, setExamLoading] = useState(false);
 
   // Diagnostics
-  const [logEntries, setLogEntries] = useState<LogEntry[]>(() => log.entries);
+  const [logEntries, setLogEntries] = useState<LogEntry[]>(() => [...log.entries]);
   const [logFilter, setLogFilter] = useState('all');
   const [logSearch, setLogSearch] = useState('');
   const [autoRefresh, setAutoRefresh] = useState(true);
 
+  // FIXED: Spreading log.entries to trigger React re-renders properly
   useEffect(() => {
     if (tab !== 'diagnostics' || !autoRefresh) return;
-    const t = setInterval(() => setLogEntries(log.entries), 2000);
+    const t = setInterval(() => setLogEntries([...log.entries]), 2000);
     return () => clearInterval(t);
   }, [tab, autoRefresh]);
 
   useEffect(() => {
-    if (tab === 'diagnostics') setLogEntries(log.entries);
+    if (tab === 'diagnostics') setLogEntries([...log.entries]);
   }, [tab]);
 
   // Load topic flags when tab opens
   useEffect(() => {
     if (tab !== 'topic-flags') return;
     setFlagsLoading(true);
-    supabase.rpc('get_topic_flag_counts' as never).then(({ data, error }) => {
+    // FIXED: Removed strict 'as never' bypass for better compatibility
+    supabase.rpc('get_topic_flag_counts' as any).then(({ data, error }) => {
       if (!error && data) {
         setTopicFlags(data as { course_id: string; topic_name: string; count: number }[]);
       } else {
@@ -709,7 +711,7 @@ const AdminDashboard = () => {
                 <option value="warn">Warnings only</option>
                 <option value="network">Network only</option>
               </select>
-              <button onClick={() => setLogEntries(log.entries)} className="p-2 rounded-lg border border-border text-muted-foreground hover:text-primary transition-colors min-h-[40px]"><RefreshCw className="h-4 w-4" /></button>
+              <button onClick={() => setLogEntries([...log.entries])} className="p-2 rounded-lg border border-border text-muted-foreground hover:text-primary transition-colors min-h-[40px]"><RefreshCw className="h-4 w-4" /></button>
               <button onClick={() => { log.clear(); setLogEntries([]); toast.success('Log cleared'); }} className="px-3 py-2 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground min-h-[40px]">Clear</button>
               <button onClick={() => log.download()} className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium min-h-[40px]"><Download className="h-4 w-4" /> Download</button>
               <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
