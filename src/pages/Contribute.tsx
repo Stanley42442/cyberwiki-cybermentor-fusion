@@ -332,7 +332,7 @@ const Contribute = () => {
                     {!isExtracting && extractedText && extractedText.length > 50 && (
                       <div className="flex items-center gap-1.5 mt-1.5 text-xs text-green-500">
                         <CheckCircle2 className="w-3 h-3" />
-                        {Math.ceil(extractedText.length / 5)} words extracted — AI will read the full document
+                        {extractedText.trim().split(/\s+/).filter(Boolean).length.toLocaleString()} words extracted — AI will read the full document
                       </div>
                     )}
                     {!isExtracting && extractedText === null && selectedFile && (

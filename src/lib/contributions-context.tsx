@@ -180,20 +180,22 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
     }
   }, [loaded]);
 
+  // adminDelete is defined below at component scope
+
   useEffect(() => {
     const timer = setTimeout(checkAndGenerateNotes, 5000);
     autoGenRef.current = setInterval(checkAndGenerateNotes, 30 * 60 * 1000);
-    const adminDelete = async (id: string) => {
+    return () => { clearTimeout(timer); if (autoGenRef.current) clearInterval(autoGenRef.current); };
+  }, [checkAndGenerateNotes]);
+
+  // Defined at component scope so it's accessible from the context value
+  const adminDelete = useCallback(async (id: string) => {
     const contrib = contributions.find(c => c.id === id);
-    // Remove from DB using service role via supabase client (admin user bypasses RLS)
     const { error } = await supabase.from('contributions').delete().eq('id', id);
     if (error) { toast.error('Failed to delete contribution'); return; }
     setContributions(prev => prev.filter(c => c.id !== id));
     toast.success(`Deleted "${contrib?.title ?? 'contribution'}"`);
-  };
-
-  return () => { clearTimeout(timer); if (autoGenRef.current) clearInterval(autoGenRef.current); };
-  }, [checkAndGenerateNotes]);
+  }, [contributions]);
 
   const submitContribution = async (contrib: Omit<Contribution, 'id' | 'status' | 'submittedAt' | 'isFastTrack'>) => {
     const isFastTrack = user?.tier === 'trusted_contributor' || user?.tier === 'admin';
