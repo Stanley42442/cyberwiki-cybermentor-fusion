@@ -95,9 +95,6 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
   const coursesRef = useRef(courses);
   coursesRef.current = courses;
 
-  // Calculate unread count based on AI-accepted (pending admin review)
-  const unreadCount = contributions.filter(c => c.status === 'ai_accepted').length;
-
   // Load contributions from Supabase
   useEffect(() => {
     (async () => {
@@ -181,22 +178,21 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
       } catch (e) { console.error('[contributions] Auto-generate failed for', courseId, e); }
       finally { setIsAutoGenerating(false); }
     }
-  }, [loaded, persistNotes]);
+  }, [loaded]);
 
-  // FIXED: Moved adminDelete OUT of useEffect scope
-  const adminDelete = useCallback(async (id: string) => {
+  useEffect(() => {
+    const timer = setTimeout(checkAndGenerateNotes, 5000);
+    autoGenRef.current = setInterval(checkAndGenerateNotes, 30 * 60 * 1000);
+    const adminDelete = async (id: string) => {
     const contrib = contributions.find(c => c.id === id);
     // Remove from DB using service role via supabase client (admin user bypasses RLS)
     const { error } = await supabase.from('contributions').delete().eq('id', id);
     if (error) { toast.error('Failed to delete contribution'); return; }
     setContributions(prev => prev.filter(c => c.id !== id));
     toast.success(`Deleted "${contrib?.title ?? 'contribution'}"`);
-  }, [contributions]);
+  };
 
-  useEffect(() => {
-    const timer = setTimeout(checkAndGenerateNotes, 5000);
-    autoGenRef.current = setInterval(checkAndGenerateNotes, 30 * 60 * 1000);
-    return () => { clearTimeout(timer); if (autoGenRef.current) clearInterval(autoGenRef.current); };
+  return () => { clearTimeout(timer); if (autoGenRef.current) clearInterval(autoGenRef.current); };
   }, [checkAndGenerateNotes]);
 
   const submitContribution = async (contrib: Omit<Contribution, 'id' | 'status' | 'submittedAt' | 'isFastTrack'>) => {
@@ -254,10 +250,9 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
         ...c, status: (isValid ? 'ai_accepted' : 'ai_rejected') as Contribution['status'],
         aiRejectionReason: isValid ? undefined : 'Content too short or low quality',
       } : c);
-      
-      // FIXED: Actually persist the fallback status so it survives a page refresh
-      await persist(updated, newContrib.id);
-      
+      // In fallback, update DB via service-role-capable upsert is not possible from client.
+      // Update local state and log — admin can manually approve if needed.
+      setContributions(updated);
       addNotification({ userId: newContrib.authorMatNumber, type: isValid ? 'ai_accepted' : 'ai_rejected', message: isValid ? `Your contribution "${newContrib.title}" passed review.` : `Your contribution "${newContrib.title}" was rejected: Content too short.`, contributionId: newContrib.id, read: false });
     }
     setIsAIProcessing(false);
@@ -276,6 +271,9 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
     toast.success('Contribution approved — extracting concepts in background…');
 
     // Fire-and-forget batched extraction.
+    // Calls extract-concepts repeatedly with increasing batchOffset until done: true.
+    // Each call processes 4 chunks (~80-100s), well under Supabase's 150s limit.
+    // generate-study-note checks extraction_status before synthesising.
     if (contrib) {
       const course = courses.find(c => c.id === contrib.courseId);
       const runExtraction = async () => {
@@ -290,7 +288,7 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
               courseCode: course?.code ?? '',
               courseTitle: course?.title ?? '',
               batchOffset: offset,
-              batchSize: 4,
+              batchSize: 2,
             },
           });
           if (error) {
@@ -324,6 +322,7 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
     toast.info('Writing study note from saved extractions…');
 
     try {
+      // Extraction already happened at approval time — just synthesise
       const { data, error } = await supabase.functions.invoke('generate-study-note', {
         body: { courseId, courseTitle: course.title, courseCode: course.code, courseDescription: course.description },
       });
@@ -335,6 +334,7 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
         const fps = loadFingerprints();
         fps[courseId] = generateFingerprint(approved);
         try { saveFingerprints(fps); } catch { /* localStorage full */ }
+        // Show warnings if any contributions were skipped
         if (data.warnings?.length > 0) {
           data.warnings.forEach((w: string) => toast.warning(w, { duration: 8000 }));
           toast.success('Study note generated (some contributions are still processing — regenerate soon)');
@@ -350,7 +350,7 @@ export const ContributionsProvider: React.FC<{ children: React.ReactNode }> = ({
     <ContributionsContext.Provider value={{
       contributions, studyNotes, submitContribution, editContribution,
       adminApprove, adminReject, adminDelete, forceRegenerateStudyNote,
-      isAIProcessing, isAutoGenerating, unreadCount,
+      isAIProcessing, isAutoGenerating, unreadCount: 0,
     }}>
       {children}
     </ContributionsContext.Provider>

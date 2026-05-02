@@ -1,15 +1,17 @@
 // supabase/functions/extract-concepts/index.ts
 //
-// Processes ONE contribution in batches of 4 chunks per call.
+// Processes ONE contribution in batches of 2 chunks per call.
 // The client calls this repeatedly with increasing batchOffset until
 // the response contains { done: true }.
 //
-// Example for a 10-chunk document:
-//   Call 1: batchOffset=0  → processes chunks 0-3 → { done: false, nextBatchOffset: 4 }
-//   Call 2: batchOffset=4  → processes chunks 4-7 → { done: false, nextBatchOffset: 8 }
-//   Call 3: batchOffset=8  → processes chunks 8-9 → { done: true }
+// Chunk size: 3,000 chars. Batch size: 2 chunks.
+// Each Gemma call takes ~30-40s, so 2 chunks = ~60-80s max per batch.
+// This keeps every single call safely under Supabase's 150s wall-clock limit.
 //
-// Each call takes ~80-100s max (4 chunks × ~25s). Always under 150s.
+// Example for a 10,000 char document (4 chunks):
+//   Call 1: batchOffset=0  → processes chunks 1-2 → { done: false, nextBatchOffset: 2 }
+//   Call 2: batchOffset=2  → processes chunks 3-4 → { done: true }
+//
 // extraction_status tracks progress so generate-study-note can warn
 // the admin if they click Force Generate before extraction finishes.
 
@@ -38,7 +40,7 @@ async function callGemma(key: string, prompt: string, systemText: string, maxTok
   return d.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 }
 
-function chunkText(text: string, chunkSize = 4000, overlap = 200): string[] {
+function chunkText(text: string, chunkSize = 3000, overlap = 150): string[] {
   if (text.length <= chunkSize) return [text];
   const chunks: string[] = [];
   let start = 0;
@@ -68,7 +70,7 @@ Deno.serve(async (req) => {
       courseCode,
       courseTitle,
       batchOffset = 0,
-      batchSize = 4,
+      batchSize = 2,
     } = await req.json();
 
     if (!contributionId || !contributionContent) {
@@ -120,7 +122,7 @@ TOPIC: [Next Topic]
 
 Be exhaustive. Every concept that could appear in an exam must be listed. Output the extraction only. No preamble.`,
           'You are a precise academic content extractor for a Nigerian university. Extract every concept, definition, and fact. Miss nothing. No preamble or commentary.',
-          600
+          500
         );
       } catch (e) {
         console.error(`[extract-concepts] Gemma failed for chunk ${chunkIndex + 1}, using raw fallback:`, e);
