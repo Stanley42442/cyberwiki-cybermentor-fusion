@@ -1,7 +1,17 @@
+// src/components/MarkdownRenderer.tsx
+// Renders markdown content with:
+//   - GitHub Flavoured Markdown (tables, strikethrough, etc.)
+//   - LaTeX math via KaTeX (inline $...$ and display $$...$$)
+//   - Mermaid diagrams (```mermaid blocks)
+//   - Timestamp links [MM:SS] for video sync
+
 import React, { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import mermaid from 'mermaid';
+import 'katex/dist/katex.min.css';
 
 interface MarkdownRendererProps {
   content: string;
@@ -13,7 +23,7 @@ mermaid.initialize({ startOnLoad: false, theme: 'dark' });
 const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, onTimestampClick }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Process timestamps like [MM:SS] into clickable buttons
+  // Process timestamps like [MM:SS] into clickable elements
   const processedContent = content.replace(/\[(\d{1,2}:\d{2})\]/g, (match, time) => {
     return `<timestamp-btn data-time="${time}">${time}</timestamp-btn>`;
   });
@@ -52,7 +62,8 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, onTimestam
   return (
     <div ref={containerRef} className="prose prose-invert max-w-none prose-headings:text-primary prose-a:text-primary prose-code:text-primary/80 prose-pre:bg-secondary">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
         components={{
           code({ className, children, ...props }) {
             return (

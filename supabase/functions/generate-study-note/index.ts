@@ -171,36 +171,39 @@ Deno.serve(async (req) => {
     // Separate contributions by extraction state
     const ready = contribs.filter(c => c.extraction_status === 'complete' && c.raw_extractions);
     const inProgress = contribs.filter(c => c.extraction_status === 'in_progress');
+    // Legacy: approved before extract-concepts existed — use raw content directly
     const notStarted = contribs.filter(c => !c.extraction_status && !c.raw_extractions);
 
-    console.log(`[gen-note] ${courseCode}: ${ready.length} ready, ${inProgress.length} in-progress, ${notStarted.length} not started`);
+    console.log(`[gen-note] ${courseCode}: ${ready.length} ready, ${inProgress.length} in-progress, ${notStarted.length} legacy (no extractions)`);
 
-    // Block if nothing is ready yet
-    if (ready.length === 0) {
-      const pending = inProgress.length + notStarted.length;
+    // Build warnings for skipped/legacy contributions
+    const warnings: string[] = [];
+    if (inProgress.length > 0) {
+      warnings.push(`${inProgress.length} contribution(s) still extracting — will be included after regeneration: ${inProgress.map(c => c.title).join(', ')}`);
+    }
+    if (notStarted.length > 0) {
+      warnings.push(`${notStarted.length} legacy contribution(s) used raw content (approve again to enable full extraction): ${notStarted.map(c => c.title).join(', ')}`);
+    }
+    warnings.forEach(w => console.warn(`[gen-note] WARNING: ${w}`));
+
+    // Combine: ready extractions + legacy raw content + in-progress raw content fallback
+    const usableContribs = [
+      ...ready.map(c => ({ title: c.title, text: c.raw_extractions as string })),
+      // Legacy: use raw content directly — not as rich as extracted but still valid input
+      ...notStarted.map(c => ({ title: c.title, text: c.content as string ?? '' })),
+      // In-progress: use whatever partial extractions are saved, fall back to raw content
+      ...inProgress.map(c => ({ title: c.title, text: (c.raw_extractions as string) || (c.content as string) || '' })),
+    ].filter(c => c.text?.trim().length > 0);
+
+    if (usableContribs.length === 0) {
       return new Response(
-        JSON.stringify({
-          error: `No contributions are ready yet. ${pending} contribution(s) are still being processed. Please wait a minute and try again.`,
-          inProgress: inProgress.map(c => c.title),
-          notStarted: notStarted.map(c => c.title),
-        }),
+        JSON.stringify({ error: 'No usable content found in any approved contributions.' }),
         { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Build warnings for skipped contributions
-    const warnings: string[] = [];
-    if (inProgress.length > 0) {
-      warnings.push(`${inProgress.length} contribution(s) still extracting — will be included in the next regeneration: ${inProgress.map(c => c.title).join(', ')}`);
-    }
-    if (notStarted.length > 0) {
-      warnings.push(`${notStarted.length} contribution(s) have no extractions yet — they may be legacy approvals: ${notStarted.map(c => c.title).join(', ')}`);
-    }
-    warnings.forEach(w => console.warn(`[gen-note] WARNING: ${w}`));
-
-    // Combine all ready extractions
-    const allExtractions = ready
-      .map(c => `=== CONTRIBUTION: ${c.title} ===\n${c.raw_extractions}`)
+    const allExtractions = usableContribs
+      .map(c => `=== CONTRIBUTION: ${c.title} ===\n${c.text}`)
       .join('\n\n' + '='.repeat(60) + '\n\n');
 
     console.log(`[gen-note] synthesising from ${ready.length} contribution(s) — ${allExtractions.length} chars`);
